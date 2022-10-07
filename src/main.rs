@@ -87,9 +87,12 @@ async fn sender<W: AsyncWriteExt + marker::Unpin>(mut send: W) {
         msg.clear();
 
         stdin.read_until(0xA, &mut msg).await.unwrap();
-        // 改行を\r\nに置き換える
-        msg.pop();
-        msg.push(0xD);
-        msg.push(0xA);
+
+        // 改行コードが\r\nでなければ\r\nに置き換える
+        if msg.len() < 2 {
+            msg.insert(0, 0xD);
+        } else if msg[msg.len() - 2] != 0xD {
+            msg.insert(msg.len() - 1, 0xD);
+        }
     }
 }
