@@ -76,7 +76,7 @@ async fn sender<W: AsyncWriteExt + marker::Unpin>(mut send: W) {
 
     // 送信するデータを読み取る
     let mut msg = Vec::new();
-    if let Ok(mut file) = File::open("./tlstest.txt").await {
+    if let Ok(mut file) = File::open("./telnetls.txt").await {
         file.read_to_end(&mut msg).await.unwrap();
     }
 
