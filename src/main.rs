@@ -1,7 +1,7 @@
 use std::{env, future::Future, marker, pin::Pin, sync::Arc};
 use tokio::{
     fs::{self, File},
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
 use tokio_rustls::rustls;
@@ -105,7 +105,7 @@ async fn main() {
 
 // 受信したメッセージを出力
 async fn receiver<R: AsyncBufReadExt + std::marker::Unpin>(mut recv: R) {
-    let mut stdout = BufWriter::new(tokio::io::stdout());
+    let mut stdout = tokio::io::stdout();
 
     while let Ok(buf) = recv.fill_buf().await {
         if buf.is_empty() {
