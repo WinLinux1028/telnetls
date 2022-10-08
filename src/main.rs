@@ -1,4 +1,4 @@
-use std::{env, marker, sync::Arc};
+use std::{env, future::Future, marker, pin::Pin, sync::Arc};
 use tokio::{
     fs::{self, File},
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -36,7 +36,31 @@ async fn main() {
             if !file_type.is_file() {
                 continue;
             }
-            if !file.path().to_str().unwrap().ends_with(".pem") {
+
+            let file_path = file.path();
+            let file_path = file_path.to_str().unwrap();
+
+            let convert: Box<
+                dyn FnOnce(Vec<u8>) -> Pin<Box<dyn Future<Output = Vec<rustls::Certificate>>>>,
+            >;
+            if file_path.ends_with(".pem") {
+                convert = Box::new(|file_buf| {
+                    Box::pin(async move {
+                        let certs = match rustls_pemfile::certs(&mut file_buf.as_slice()) {
+                            Ok(o) => o,
+                            Err(_) => return Vec::new(),
+                        };
+                        certs
+                            .into_iter()
+                            .map(|cert| rustls::Certificate(cert))
+                            .collect()
+                    })
+                });
+            } else if file_path.ends_with(".der") {
+                convert = Box::new(|file_buf| {
+                    Box::pin(async move { vec![rustls::Certificate(file_buf)] })
+                });
+            } else {
                 continue;
             }
 
@@ -44,17 +68,14 @@ async fn main() {
                 Ok(o) => o,
                 Err(_) => continue,
             };
-            let mut certs_from_file = Vec::new();
-
-            if file.read_to_end(&mut certs_from_file).await.is_err() {
+            let mut file_buf = Vec::new();
+            if file.read_to_end(&mut file_buf).await.is_err() {
                 continue;
             }
-            let certs_from_file = match rustls_pemfile::certs(&mut certs_from_file.as_slice()) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
+
+            let certs_from_file = convert(file_buf).await;
             for cert in certs_from_file {
-                let _ = certs.add(&rustls::Certificate(cert));
+                let _ = certs.add(&cert);
             }
         }
     }
