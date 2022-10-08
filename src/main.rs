@@ -1,7 +1,7 @@
 use std::{env, future::Future, marker, pin::Pin, sync::Arc};
 use tokio::{
     fs::{self, File},
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::TcpStream,
 };
 use tokio_rustls::rustls;
@@ -91,7 +91,7 @@ async fn main() {
         .connect(host.try_into().unwrap(), connection)
         .await
         .unwrap();
-    println!("Connected to {}.", host);
+    eprintln!("Connected to {}.", host);
     let (recv, send) = tokio::io::split(connection);
 
     let receiver = tokio::spawn(receiver(BufReader::new(recv)));
@@ -103,25 +103,24 @@ async fn main() {
     std::process::exit(0);
 }
 
-// 受信したメッセージをリアルタイムに出力
+// 受信したメッセージを出力
 async fn receiver<R: AsyncBufReadExt + std::marker::Unpin>(mut recv: R) {
-    let mut stdout = tokio::io::stdout();
+    let mut stdout = BufWriter::new(tokio::io::stdout());
 
-    let mut buf = [0];
-    let buf = buf.as_mut_slice();
-    loop {
-        if recv.read_exact(buf).await.is_err() {
-            stdout
-                .write_all("connection closed\n".as_bytes())
-                .await
-                .unwrap();
-            stdout.flush().await.unwrap();
-            return;
+    while let Ok(buf) = recv.fill_buf().await {
+        if buf.is_empty() {
+            break;
         }
 
         stdout.write_all(buf).await.unwrap();
         stdout.flush().await.unwrap();
+
+        // 後始末
+        let buf_len = buf.len();
+        recv.consume(buf_len);
     }
+
+    eprintln!("Connection closed by foreign host.");
 }
 
 // txtファイルに指定されたデータを送信してからtelnetのように動作する
