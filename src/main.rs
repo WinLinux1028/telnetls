@@ -1,6 +1,6 @@
 use std::{env, marker, sync::Arc};
 use tokio::{
-    fs::File,
+    fs::{self, File},
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpStream,
 };
@@ -26,6 +26,38 @@ async fn main() {
     for cert in rustls_native_certs::load_native_certs().unwrap() {
         certs.add(&rustls::Certificate(cert.0)).unwrap();
     }
+    // ファイルから証明書を読み込む
+    if let Ok(mut dir) = fs::read_dir("./certs").await {
+        while let Ok(Some(file)) = dir.next_entry().await {
+            let file_type = match file.file_type().await {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            if !file_type.is_file() {
+                continue;
+            }
+            if !file.path().to_str().unwrap().ends_with(".pem") {
+                continue;
+            }
+
+            let mut file = match fs::File::open(file.path()).await {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            let mut certs_from_file = Vec::new();
+
+            if file.read_to_end(&mut certs_from_file).await.is_err() {
+                continue;
+            }
+            let certs_from_file = match rustls_pemfile::certs(&mut certs_from_file.as_slice()) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+            for cert in certs_from_file {
+                let _ = certs.add(&rustls::Certificate(cert));
+            }
+        }
+    }
     let config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_root_certificates(certs)
@@ -38,6 +70,7 @@ async fn main() {
         .connect(host.try_into().unwrap(), connection)
         .await
         .unwrap();
+    println!("Connected to {}.", host);
     let (recv, send) = tokio::io::split(connection);
 
     let receiver = tokio::spawn(receiver(BufReader::new(recv)));
