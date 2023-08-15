@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::{env, future::Future, marker, pin::Pin, sync::Arc};
 use tokio::{
     fs::{self, File},
