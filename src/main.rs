@@ -20,10 +20,6 @@ async fn main() {
     let port = options.next().unwrap_or_else(|| "443".to_string());
     let host_port = format!("{}:{}", host, port);
 
-    // ユーザーの入力を処理する
-    let host_port = host_port.trim();
-    let host = host_port.split(':').next().unwrap();
-
     // TLS接続の設定
     let mut certs = rustls::RootCertStore::empty();
     for cert in rustls_native_certs::load_native_certs().unwrap() {
@@ -91,7 +87,7 @@ async fn main() {
     // 接続を行う
     let connection = TcpStream::connect(host_port).await.unwrap();
     let connection = config
-        .connect(host.try_into().unwrap(), connection)
+        .connect(host.as_str().try_into().unwrap(), connection)
         .await
         .unwrap();
     eprintln!("Connected to {}.", host);
