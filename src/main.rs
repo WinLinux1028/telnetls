@@ -1,10 +1,13 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::{env, future::Future, marker, pin::Pin, sync::Arc};
+use std::{env, future::Future, marker, pin::pin, pin::Pin, sync::Arc};
 use tokio::{
     fs::{self, File},
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{
+        AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+        BufStream,
+    },
     net::TcpStream,
 };
 use tokio_rustls::rustls;
@@ -85,7 +88,7 @@ async fn main() {
     let config = tokio_rustls::TlsConnector::from(Arc::new(config));
 
     // 接続を行う
-    let connection = TcpStream::connect(host_port).await.unwrap();
+    let connection = BufStream::new(TcpStream::connect(host_port).await.unwrap());
     let connection = config
         .connect(host.as_str().try_into().unwrap(), connection)
         .await
@@ -93,58 +96,153 @@ async fn main() {
     eprintln!("Connected to {}.", host);
     let (recv, send) = tokio::io::split(connection);
 
-    let receiver = tokio::spawn(receiver(BufReader::new(recv)));
-    let sender = tokio::spawn(sender(send));
-
-    let _ = receiver.await;
-    sender.abort();
+    tokio::select! {
+        _ = sender(send) => (),
+        _ = receiver(recv) => (),
+    }
+    eprintln!("Connection closed by foreign host.");
 
     std::process::exit(0);
 }
 
 // 受信したメッセージを出力
-async fn receiver<R: AsyncBufReadExt + std::marker::Unpin>(mut recv: R) {
+async fn receiver<R>(recv: R)
+where
+    R: AsyncReadExt + Unpin,
+{
     let mut stdout = tokio::io::stdout();
 
-    while let Ok(buf) = recv.fill_buf().await {
+    let _ = copy_low_latency(BufReader::new(recv), &mut stdout).await;
+}
+
+// txtファイルに指定されたデータを送信してからtelnetのように動作する
+async fn sender<W: AsyncWriteExt + marker::Unpin>(send: W) {
+    let mut send = ConvertCRLFWriter::new(send);
+    let stdin = tokio::io::stdin();
+
+    // 事前に送信するデータを読み取り送信する
+    if let Ok(file) = File::open("./telnetls.txt").await {
+        let _ = copy_low_latency(BufReader::new(file), &mut send).await;
+    }
+
+    let _ = copy_low_latency(BufReader::new(stdin), &mut send).await;
+}
+
+struct ConvertCRLFWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    inner: W,
+    #[cfg(windows)]
+    is_before_cr: bool,
+}
+
+impl<W> ConvertCRLFWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn new(inner: W) -> Self {
+        Self {
+            inner,
+            #[cfg(windows)]
+            is_before_cr: false,
+        }
+    }
+}
+
+impl<W> AsyncWrite for ConvertCRLFWriter<W>
+where
+    W: AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, std::io::Error>> {
+        #[cfg(not(windows))]
+        let task = pin!(async {
+            let mut start_index = 0;
+            for (index, byte) in buf.iter().enumerate() {
+                if *byte == 0x0D {
+                    self.inner.write_all(&buf[start_index..index]).await?;
+                    self.inner.write_all(&[0x0D, 0x00]).await?;
+                    start_index = index + 1;
+                } else if *byte == 0x0A {
+                    self.inner.write_all(&buf[start_index..index]).await?;
+                    self.inner.write_all(&[0x0D, 0x0A]).await?;
+                    start_index = index + 1;
+                }
+            }
+
+            if start_index != buf.len() {
+                self.inner.write_all(&buf[start_index..buf.len()]).await?;
+            }
+            Ok(buf.len())
+        });
+
+        #[cfg(windows)]
+        let task = pin!(async {
+            let mut start_index = 0;
+            for (index, byte) in buf.iter().enumerate() {
+                if self.is_before_cr && *byte != 0x0A {
+                    if index != 0 {
+                        self.inner.write_all(&buf[start_index..index - 1]).await?;
+                    }
+                    self.inner.write_all(&[0x0D, 0x00]).await?;
+                    start_index = index;
+                }
+                if !self.is_before_cr && *byte == 0x0A {
+                    self.inner.write_all(&buf[start_index..index]).await?;
+                    self.inner.write_all(&[0x0D, 0x0A]).await?;
+                    start_index = index + 1;
+                }
+
+                self.is_before_cr = *byte == 0x0D;
+            }
+
+            if start_index != buf.len() {
+                let range = if self.is_before_cr {
+                    start_index..buf.len() - 1
+                } else {
+                    start_index..buf.len()
+                };
+                self.inner.write_all(&buf[range]).await?;
+            }
+            Ok(buf.len())
+        });
+
+        Future::poll(task, cx)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        AsyncWrite::poll_flush(Pin::new(&mut self.inner), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), std::io::Error>> {
+        AsyncWrite::poll_shutdown(Pin::new(&mut self.inner), cx)
+    }
+}
+
+async fn copy_low_latency<R, W>(mut reader: R, writer: &mut W)
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    while let Ok(buf) = reader.fill_buf().await {
         if buf.is_empty() {
             break;
         }
 
-        stdout.write_all(buf).await.unwrap();
-        stdout.flush().await.unwrap();
+        let _ = writer.write_all(buf).await;
+        let _ = writer.flush().await;
 
-        // 後始末
         let buf_len = buf.len();
-        recv.consume(buf_len);
-    }
-
-    eprintln!("Connection closed by foreign host.");
-}
-
-// txtファイルに指定されたデータを送信してからtelnetのように動作する
-async fn sender<W: AsyncWriteExt + marker::Unpin>(mut send: W) {
-    let mut stdin = BufReader::new(tokio::io::stdin());
-
-    // 送信するデータを読み取る
-    let mut msg = Vec::new();
-    if let Ok(mut file) = File::open("./telnetls.txt").await {
-        file.read_to_end(&mut msg).await.unwrap();
-    }
-
-    loop {
-        if send.write_all(&msg).await.is_err() || send.flush().await.is_err() {
-            return;
-        }
-        msg.clear();
-
-        stdin.read_until(0xA, &mut msg).await.unwrap();
-
-        // 改行コードが\r\nでなければ\r\nに置き換える
-        if msg.len() < 2 {
-            msg.insert(0, 0xD);
-        } else if msg[msg.len() - 2] != 0xD {
-            msg.insert(msg.len() - 1, 0xD);
-        }
+        reader.consume(buf_len);
     }
 }
